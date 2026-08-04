@@ -71,7 +71,21 @@ await api.forceLogin({ token, expires });
 api.clearCachedLogin();
 ```
 
-Tokens are stored as plaintext because the original value must be sent upstream. Protect the cache file and never commit or expose a token. Username/password login, CAPTCHA automation, and browser-session extraction are not implemented.
+Tokens are stored as plaintext because the original value must be sent upstream. Protect the cache file and never commit or expose a token. Username/password login, CAPTCHA automation, and browser cookie extraction are not implemented.
+
+### Quote token from a session ID
+
+Exchange an existing TradingView `sessionid` cookie for a websocket quote token:
+
+```js
+const api = new TradingviewAPI({ save_session: false });
+const result = await api.quoteToken(process.env.TRADINGVIEW_SESSION_ID);
+
+console.log(result.code);  // 200
+console.log(result.token); // TradingView quote token
+```
+
+The result has the shape `{ code: 200, token }`. The request sends only the supplied `sessionid` cookie and the required `grabSession=true` form field. Invalid or expired sessions throw `TradingViewAuthError`. Treat both the session ID and returned token as active credentials.
 
 ## Data status
 

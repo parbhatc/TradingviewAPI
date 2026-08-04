@@ -49,6 +49,90 @@ export class TradingViewClient {
     };
   }
 
+  async getQuoteToken({ sessionId }) {
+    if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+      throw new TradingViewAuthError('A non-empty TradingView sessionid is required', {
+        code: 'SESSION_ID_REQUIRED',
+        statusCode: 400
+      });
+    }
+
+    const normalizedSessionId = sessionId.trim();
+    if (/[\u0000-\u0020\u007f;,]/.test(normalizedSessionId)) {
+      throw new TradingViewAuthError('TradingView sessionid contains invalid cookie characters', {
+        code: 'INVALID_SESSION_ID',
+        statusCode: 400
+      });
+    }
+
+    const url = new URL('/quote_token/', this.options.origin);
+    const request = this.options.fetch ?? globalThis.fetch;
+    if (typeof request !== 'function') {
+      throw new TradingViewError('A Fetch API implementation is required', {
+        code: 'FETCH_UNAVAILABLE',
+        statusCode: 500
+      });
+    }
+
+    let response;
+    try {
+      response = await request(url, {
+        method: 'POST',
+        headers: {
+          Accept: '*/*',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Cookie: `sessionid=${normalizedSessionId}`,
+          Origin: this.options.origin,
+          Referer: `${this.options.origin.replace(/\/$/, '')}/`,
+          'User-Agent': 'Mozilla/5.0 TradingviewAPI/1.0',
+          'X-Language': 'en',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: 'grabSession=true',
+        signal: AbortSignal.timeout(this.options.timeoutMs)
+      });
+    } catch (error) {
+      throw new TradingViewError('TradingView quote-token request failed', {
+        code: 'QUOTE_TOKEN_REQUEST_FAILED',
+        details: error.message
+      });
+    }
+
+    const text = await response.text();
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new TradingViewError('TradingView returned an invalid quote-token response', {
+        code: 'INVALID_QUOTE_TOKEN_RESPONSE',
+        details: text
+      });
+    }
+
+    if (!response.ok) {
+      const ErrorType = response.status === 401 || response.status === 403
+        ? TradingViewAuthError
+        : TradingViewError;
+      throw new ErrorType(payload?.detail || `Quote-token request failed with HTTP ${response.status}`, {
+        code: payload?.code || 'QUOTE_TOKEN_REQUEST_FAILED',
+        statusCode: response.status,
+        details: payload
+      });
+    }
+
+    if (typeof payload !== 'string' || payload.trim() === '') {
+      throw new TradingViewError('TradingView returned an empty quote token', {
+        code: 'INVALID_QUOTE_TOKEN_RESPONSE',
+        details: payload
+      });
+    }
+
+    return {
+      code: 200,
+      token: payload
+    };
+  }
+
   async createConnection() { return new TradingViewConnection(this.options).connect(); }
 
   async getSymbolInfo({ symbol, session = 'regular', adjustment = 'splits' }) {

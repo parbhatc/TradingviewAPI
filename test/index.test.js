@@ -15,6 +15,12 @@ test('public class creates and controls replay sessions', async () => {
     },
     async getHistory({ symbol, interval }) {
       return { symbol, interval, bars };
+    },
+    async getQuoteToken({ sessionId }) {
+      return {
+        code: 200,
+        token: `token-for-${sessionId}`
+      };
     }
   };
   const api = new TradingviewAPI({ client, replay: { ttlMs: 60_000, maxSessions: 10 } });
@@ -28,6 +34,10 @@ test('public class creates and controls replay sessions', async () => {
 
     assert.equal(replay.currentBar.close, 2);
     assert.equal((await api.symbol('TEST:X')).delaySeconds, 600);
+    assert.deepEqual(await api.quoteToken('session-value'), {
+      code: 200,
+      token: 'token-for-session-value'
+    });
     assert.equal(api.getReplay(replay.id), replay);
     replay.next().previous().setSpeed(5).play().pause();
     assert.equal(replay.speed, 5);

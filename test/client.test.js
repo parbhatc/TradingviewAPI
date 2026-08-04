@@ -22,6 +22,72 @@ test('configured tokens use token mode', () => {
   assert.equal(client.authenticationMode, 'token');
 });
 
+test('requests a quote token with only the supplied sessionid cookie', async () => {
+  let received;
+  const client = new TradingViewClient({
+    ...options,
+    fetch: async (url, init) => {
+      received = { url: String(url), init };
+      return new Response(JSON.stringify('header.payload.signature'), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  });
+
+  const result = await client.getQuoteToken({ sessionId: 'session-value' });
+
+  assert.deepEqual(result, {
+    code: 200,
+    token: 'header.payload.signature'
+  });
+  assert.equal(received.url, 'https://www.tradingview.com/quote_token/');
+  assert.equal(received.init.method, 'POST');
+  assert.equal(received.init.headers.Cookie, 'sessionid=session-value');
+  assert.equal(received.init.headers['Content-Type'], 'application/x-www-form-urlencoded');
+  assert.equal(received.init.body, 'grabSession=true');
+});
+
+test('rejects invalid sessionid cookie characters before making a request', async () => {
+  let called = false;
+  const client = new TradingViewClient({
+    ...options,
+    fetch: async () => {
+      called = true;
+      return new Response();
+    }
+  });
+
+  await assert.rejects(
+    client.getQuoteToken({ sessionId: 'valid; injected=value' }),
+    { name: 'TradingViewAuthError', code: 'INVALID_SESSION_ID', statusCode: 400 }
+  );
+  assert.equal(called, false);
+});
+
+test('reports TradingView quote-token authentication failures', async () => {
+  const client = new TradingViewClient({
+    ...options,
+    fetch: async () => new Response(JSON.stringify({
+      detail: 'Login required.',
+      code: 'login_required'
+    }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' }
+    })
+  });
+
+  await assert.rejects(
+    client.getQuoteToken({ sessionId: 'expired-session' }),
+    {
+      name: 'TradingViewAuthError',
+      message: 'Login required.',
+      code: 'login_required',
+      statusCode: 403
+    }
+  );
+});
+
 class HistoryConnection extends EventEmitter {
   constructor(pages) {
     super();

@@ -38,6 +38,10 @@ export class TradingviewAPI {
     return this.#performLogin(credentials, 'force');
   }
 
+  quoteToken(sessionId) {
+    return this.client.getQuoteToken({ sessionId });
+  }
+
   clearCachedLogin() {
     this.loginCache.clear();
     this.cachedLogin = null;
