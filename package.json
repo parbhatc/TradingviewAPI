@@ -1,0 +1,28 @@
+{
+  "name": "tradingviewapi",
+  "version": "1.0.0",
+  "description": "Node.js REST, SSE, and historical replay API backed by TradingView market data.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./server": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "smoke": "node scripts/smoke.js",
+    "test": "node --test",
+    "check": "node --check src/server.js && node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@fastify/swagger": "^9.5.1",
+    "@fastify/swagger-ui": "^6.1.1",
+    "fastify": "^5.5.0",
+    "ws": "^8.18.3"
+  }
+}
