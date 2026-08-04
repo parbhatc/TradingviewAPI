@@ -1,5 +1,5 @@
 import { TradingViewConnection } from './connection.js';
-import { TradingViewError } from './errors.js';
+import { TradingViewAuthError, TradingViewError } from './errors.js';
 import { InboundMessage, Messages } from './protocol/messages.js';
 import { randomId } from './id.js';
 
@@ -8,6 +8,18 @@ function normalizeBar(row) {
   if (!Array.isArray(values) || values.length < 6) return null;
   const offset = values.length >= 7 ? 1 : 0;
   return { time: Number(values[offset]), open: Number(values[offset + 1]), high: Number(values[offset + 2]), low: Number(values[offset + 3]), close: Number(values[offset + 4]), volume: Number(values[offset + 5] ?? 0) };
+}
+
+function normalizeHistoryEnd(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    throw new TradingViewError('to must be a positive Unix timestamp', {
+      code: 'INVALID_HISTORY_END',
+      statusCode: 400
+    });
+  }
+  return Math.floor(number > 1e12 ? number / 1000 : number);
 }
 
 export class TradingViewClient {
@@ -21,6 +33,22 @@ export class TradingViewClient {
   get authenticationMode() {
     return this.options.authToken === 'unauthorized_user_token' ? 'anonymous' : 'token';
   }
+
+  setAuthToken(token) {
+    if (typeof token !== 'string' || token.trim() === '') {
+      throw new TradingViewAuthError('A non-empty TradingView auth token is required', {
+        code: 'TOKEN_REQUIRED',
+        statusCode: 400
+      });
+    }
+
+    this.options.authToken = token.trim();
+    return {
+      authenticated: true,
+      authenticationMode: this.authenticationMode
+    };
+  }
+
   async createConnection() { return new TradingViewConnection(this.options).connect(); }
 
   async getSymbolInfo({ symbol, session = 'regular', adjustment = 'splits' }) {
@@ -64,22 +92,99 @@ export class TradingViewClient {
     }
   }
 
-  async getHistory({ symbol, interval = '1D', bars = 300, session = 'regular', adjustment = 'splits' }) {
-    if (bars > this.options.maxBars) throw new TradingViewError(`bars cannot exceed ${this.options.maxBars}`, { code: 'LIMIT_EXCEEDED', statusCode: 400 });
+  async getHistory({ symbol, interval = '1D', bars = 300, chunkSize = 500, session = 'regular', adjustment = 'splits', to }) {
+    if (!Number.isInteger(bars) || bars < 1 || bars > this.options.maxBars) {
+      throw new TradingViewError(`bars must be an integer between 1 and ${this.options.maxBars}`, { code: 'LIMIT_EXCEEDED', statusCode: 400 });
+    }
+    if (!Number.isInteger(chunkSize) || chunkSize < 1) {
+      throw new TradingViewError('chunkSize must be a positive integer', { code: 'INVALID_CHUNK_SIZE', statusCode: 400 });
+    }
+    const endTimestamp = normalizeHistoryEnd(to);
+
     const connection = await this.createConnection();
     const chartSession = randomId('cs');
     const symbolId = 'symbol_1';
     const seriesId = 'series_1';
+    const barsByTime = new Map();
+    let status = 'ok';
+
+    const addSeries = (series) => {
+      if (series?.status) status = series.status;
+      for (const row of series?.s ?? []) {
+        const bar = normalizeBar(row);
+        if (bar && Number.isFinite(bar.time)) barsByTime.set(bar.time, bar);
+      }
+    };
+
     try {
       connection.send(Messages.createChartSession(chartSession));
       connection.send(Messages.switchTimezone(chartSession));
       connection.send(Messages.resolveSymbol(chartSession, symbolId, { symbol, adjustment, session }));
-      const result = connection.waitFor((incoming) => incoming.type === InboundMessage.TIMESCALE_UPDATE && incoming.params[0] === chartSession && Boolean(incoming.params?.[1]?.[seriesId]?.s));
-      connection.send(Messages.createSeries(chartSession, seriesId, 's1', symbolId, interval, bars));
-      const incoming = await result;
-      const series = incoming.params[1][seriesId];
-      return { symbol, interval, timezone: 'Etc/UTC', status: series.status ?? 'ok', bars: series.s.map(normalizeBar).filter(Boolean) };
+      const initialSize = Math.min(bars, chunkSize);
+      const initialSeries = await this.#requestSeriesChunk(connection, chartSession, seriesId, () => {
+        connection.send(Messages.createSeries(chartSession, seriesId, 's1', symbolId, interval, initialSize));
+      });
+      initialSeries.forEach(addSeries);
+
+      const eligibleCount = () => {
+        if (endTimestamp === null) return barsByTime.size;
+        let count = 0;
+        for (const timestamp of barsByTime.keys()) {
+          if (timestamp <= endTimestamp) count += 1;
+        }
+        return count;
+      };
+
+      while (eligibleCount() < bars && barsByTime.size < this.options.maxBars) {
+        const before = barsByTime.size;
+        const requested = Math.min(
+          chunkSize,
+          endTimestamp === null ? bars - before : this.options.maxBars - before
+        );
+        const seriesUpdates = await this.#requestSeriesChunk(connection, chartSession, seriesId, () => {
+          connection.send(Messages.requestMoreData(chartSession, seriesId, requested));
+        });
+        seriesUpdates.forEach(addSeries);
+        if (barsByTime.size === before) break;
+      }
+
+      const loadedBars = [...barsByTime.values()]
+        .sort((left, right) => left.time - right.time)
+        .filter((bar) => endTimestamp === null || bar.time <= endTimestamp)
+        .slice(-bars);
+      return {
+        symbol,
+        interval,
+        timezone: 'Etc/UTC',
+        status,
+        bars: loadedBars,
+        to: endTimestamp,
+        historyExhausted: loadedBars.length < bars && barsByTime.size < this.options.maxBars
+      };
     } finally { connection.close(); }
+  }
+
+  async #requestSeriesChunk(connection, chartSession, seriesId, send) {
+    const updates = [];
+    const onMessage = (incoming) => {
+      if (incoming.type !== InboundMessage.TIMESCALE_UPDATE || incoming.params[0] !== chartSession) return;
+      const series = incoming.params?.[1]?.[seriesId];
+      if (series) updates.push(series);
+    };
+
+    connection.on('message', onMessage);
+    try {
+      const completed = connection.waitFor((incoming) => (
+        incoming.type === InboundMessage.SERIES_COMPLETED &&
+        incoming.params[0] === chartSession &&
+        incoming.params[1] === seriesId
+      ));
+      send();
+      await completed;
+      return updates;
+    } finally {
+      connection.off('message', onMessage);
+    }
   }
 
   async getQuotes(symbols) {
@@ -154,8 +259,23 @@ export class TradingViewClient {
     const response = await fetch(url, { headers: { Origin: this.options.origin, 'User-Agent': 'Mozilla/5.0 TradingviewAPI/1.0' }, signal: AbortSignal.timeout(this.options.timeoutMs) });
     if (!response.ok) throw new TradingViewError(`Symbol search failed with HTTP ${response.status}`);
     const results = await response.json();
-    return results.slice(0, limit).map((item) => ({ symbol: item.symbol, fullName: item.exchange ? `${item.exchange}:${item.symbol}` : item.symbol, description: item.description, exchange: item.exchange, type: item.type, currency: item.currency_code, country: item.country }));
+    return results.slice(0, limit).map((item) => {
+      const continuous = item.type === 'futures'
+        ? item.contracts?.find((contract) => contract.typespecs?.includes('continuous'))
+        : null;
+      const symbol = continuous?.symbol || item.symbol;
+      const prefix = continuous?.prefix || item.source_id || item.exchange;
+      return {
+        symbol: item.symbol,
+        fullName: prefix ? `${prefix}:${symbol}` : symbol,
+        description: item.description,
+        exchange: item.exchange,
+        type: item.type,
+        currency: item.currency_code,
+        country: item.country
+      };
+    });
   }
 }
 
-export { TradingViewError } from './errors.js';
+export { TradingViewAuthError, TradingViewError } from './errors.js';

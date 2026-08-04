@@ -7,3 +7,10 @@ export class TradingViewError extends Error {
     this.details = details;
   }
 }
+
+export class TradingViewAuthError extends TradingViewError {
+  constructor(message, { code = 'AUTHENTICATION_FAILED', statusCode = 401, details } = {}) {
+    super(message, { code, statusCode, details });
+    this.name = 'TradingViewAuthError';
+  }
+}

@@ -1,4 +1,5 @@
 import { loadConfig } from './config.js';
+import { LoginCache } from './auth/cache.js';
 import { ReplayManager } from './replay/manager.js';
 import { TradingViewClient } from './tradingview/client.js';
 
@@ -10,10 +11,67 @@ export class TradingviewAPI {
 
     this.client = options.client ?? new TradingViewClient(tradingView);
     this.replays = options.replayManager ?? new ReplayManager(replay);
+    this.loginCache = options.loginCache ?? new LoginCache({
+      enabled: options.save_session !== false,
+      path: options.cache_path
+    });
+    this.cachedLogin = this.loginCache.load();
+    if (this.cachedLogin) this.client.setAuthToken(this.cachedLogin.token);
   }
 
   search(query, options = {}) {
     return this.client.searchSymbols({ query, ...options });
+  }
+
+  async login(credentials) {
+    const cached = this.loginCache.load();
+    if (cached) {
+      this.cachedLogin = cached;
+      this.client.setAuthToken(cached.token);
+      return this.#loginResult(cached, 'cache');
+    }
+
+    return this.#performLogin(credentials, 'login');
+  }
+
+  forceLogin(credentials) {
+    return this.#performLogin(credentials, 'force');
+  }
+
+  clearCachedLogin() {
+    this.loginCache.clear();
+    this.cachedLogin = null;
+    this.client.options.authToken = 'unauthorized_user_token';
+  }
+
+  async #performLogin(credentials, source) {
+    if (!credentials || typeof credentials !== 'object' || credentials.token === undefined) {
+      throw new TypeError('login requires { token, expires }');
+    }
+
+    const result = this.client.setAuthToken(credentials.token);
+
+    const session = this.loginCache.save({
+      token: this.client.options.authToken,
+      expires: credentials.expires
+    });
+    this.cachedLogin = session;
+
+    return {
+      ...result,
+      source,
+      expiresAt: session?.expiresAt ? new Date(session.expiresAt).toISOString() : null
+    };
+  }
+
+  #loginResult(session, source) {
+    return {
+      authenticated: true,
+      authenticationMode: this.client.authenticationMode,
+      source,
+      expiresAt: session.expiresAt ? new Date(session.expiresAt).toISOString() : null,
+      user: session.user ?? undefined
+    };
   }
 
   quotes(symbols) {
@@ -72,4 +130,5 @@ export class TradingviewAPI {
 
 export { ReplayManager } from './replay/manager.js';
 export { ReplaySession } from './replay/session.js';
-export { TradingViewClient, TradingViewError } from './tradingview/client.js';
+export { LoginCache } from './auth/cache.js';
+export { TradingViewAuthError, TradingViewClient, TradingViewError } from './tradingview/client.js';

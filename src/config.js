@@ -8,9 +8,6 @@ function integer(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}
 
 export function loadConfig() {
   return {
-    host: process.env.HOST ?? '127.0.0.1',
-    port: integer('PORT', 3000, { max: 65535 }),
-    logLevel: process.env.LOG_LEVEL ?? 'info',
     tradingView: {
       authToken: process.env.TRADINGVIEW_AUTH_TOKEN?.trim() || 'unauthorized_user_token',
       origin: process.env.TRADINGVIEW_ORIGIN ?? 'https://www.tradingview.com',

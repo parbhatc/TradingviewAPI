@@ -36,7 +36,8 @@ export const QUOTE_FIELDS = Object.freeze([
   'base-currency-logoid', 'ch', 'chp', 'currency_code', 'current_session', 'description',
   'exchange', 'format', 'fractional', 'is_tradable', 'language', 'local_description',
   'logoid', 'lp', 'lp_time', 'minmov', 'minmove2', 'original_name', 'pricescale',
-  'pro_name', 'short_name', 'type', 'update_mode', 'volume', 'currency-logoid'
+  'pro_name', 'short_name', 'type', 'update_mode', 'volume', 'bid', 'ask',
+  'bid_size', 'ask_size', 'currency-logoid'
 ]);
 
 const message = (method, params) => ({ method, params });

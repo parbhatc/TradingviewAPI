@@ -1,207 +1,172 @@
 # TradingviewAPI
 
-A Node.js service that exposes TradingView symbol search, quote snapshots, OHLCV history, live quote streams, and a controllable historical-bar replay engine through a documented HTTP API.
+A class-based Node.js library for TradingView symbol search, quote snapshots, OHLCV history, live quote streams, and controllable historical replay.
 
-The API uses TradingView's web data transport. It is **unofficial and not affiliated with TradingView**. TradingView can change the protocol at any time. Use it only in ways permitted by TradingView's terms and by the market-data licenses that apply to your account. Do not redistribute exchange data unless you have permission. For production trading or guaranteed availability, use a licensed market-data provider or an official broker API.
+This project uses TradingView's unofficial web data transport and is not affiliated with TradingView. The protocol can change without notice. Follow TradingView's terms and the market-data licenses applicable to your account.
 
 ## Features
 
-- Symbol search across TradingView exchanges and asset classes
-- Quote snapshots for up to 50 symbols per request
-- OHLCV history for intraday, daily, weekly, and monthly intervals
-- Live quotes over Server-Sent Events (SSE)
-- Automatic live-stream reconnection with exponential backoff
-- Historical replay sessions with pause, resume, seek, speed (up to 100 bars/second), completion, and deletion
-- Replay events over SSE
-- OpenAPI document and interactive Swagger UI
-- Request validation, structured errors, timeouts, graceful shutdown, replay expiry, and session limits
-- Unit and HTTP integration tests
+- Anonymous public and delayed market data by default
+- Optional TradingView websocket token authentication
+- Symbol search and entitlement-aware data status
+- Quote snapshots and reconnecting live streams
+- Intraday, daily, weekly, and monthly OHLCV history
+- Class-based replay with play, pause, seek, timestamp navigation, stepping, and speed control
+- Optional local token-session persistence
 
 ## Requirements
 
 - Node.js 20 or newer
 - Network access to `tradingview.com` and `data.tradingview.com`
 
-## Install and run
+## Install
 
 ```powershell
 npm install
-Copy-Item .env.example .env
-npm start
 ```
 
-Open:
-
-- API docs: <http://127.0.0.1:3000/docs>
-- OpenAPI JSON: <http://127.0.0.1:3000/docs/json>
-- Health check: <http://127.0.0.1:3000/health>
-
-Environment variables are optional. The defaults run locally on `127.0.0.1:3000` with anonymous TradingView access. See [.env.example](.env.example) for every setting. Node does not automatically read `.env`; load it in your process manager or start with `node --env-file=.env src/server.js`.
-
-## Symbol format
-
-Use TradingView's fully qualified symbol format whenever possible:
-
-- `NASDAQ:AAPL`
-- `CME_MINI:NQ1!`
-- `FX:EURUSD`
-- `BINANCE:BTCUSDT`
-
-Search first when you do not know the exchange-qualified name:
-
-```bash
-curl "http://127.0.0.1:3000/api/v1/symbols/search?q=Apple&limit=5"
-```
-
-## JavaScript class API
-
-Import the public `TradingviewAPI` class when using this project as a Node.js library:
+## Quick start
 
 ```js
-import { TradingviewAPI } from './src/index.js';
+import { TradingviewAPI } from 'tradingviewapi';
 
 const api = new TradingviewAPI();
 
-const quote = await api.quotes('CME_MINI:NQ1!');
+const quotes = await api.quotes(['NASDAQ:AAPL', 'BINANCE:BTCUSDT']);
 const symbol = await api.symbol('CME_MINI:NQ1!');
-console.log(symbol.delaySeconds, symbol.realtime);
-const history = await api.history('CME_MINI:NQ1!', {
+const history = await api.history('NASDAQ:AAPL', {
   interval: '1D',
   bars: 300
 });
 
-const replay = await api.replay('CME_MINI:NQ1!', {
+console.log(quotes);
+console.log(symbol.delaySeconds, symbol.realtime);
+console.log(history.bars);
+
+api.close();
+```
+
+Common symbol formats include `NASDAQ:AAPL`, `CME_MINI:NQ1!`, `FX:EURUSD`, and `BINANCE:BTCUSDT`. Use `api.search('Apple')` when you do not know the exchange-qualified name.
+
+## Authentication
+
+Anonymous mode uses `unauthorized_user_token` and is the default. It may receive delayed data or lack access to restricted feeds.
+
+Supply an existing TradingView websocket token when you have one:
+
+```js
+await api.login({
+  token: process.env.TRADINGVIEW_AUTH_TOKEN,
+  expires: 1798761600
+});
+```
+
+Session persistence is enabled by default. Tokens are saved in the gitignored `.tradingview/session.json` file. `expires` may be Unix seconds, Unix milliseconds, a `Date`, or an ISO date string. A later `TradingviewAPI` instance automatically loads a valid saved token.
+
+Use `forceLogin()` to replace the saved token, or disable persistence entirely:
+
+```js
+const api = new TradingviewAPI({ save_session: false });
+await api.forceLogin({ token, expires });
+api.clearCachedLogin();
+```
+
+Tokens are stored as plaintext because the original value must be sent upstream. Protect the cache file and never commit or expose a token. Username/password login, CAPTCHA automation, and browser-session extraction are not implemented.
+
+## Data status
+
+`api.symbol()` reports the delay received from TradingView:
+
+```js
+const status = await api.symbol('CME_MINI:NQ1!');
+
+console.log({
+  realtime: status.realtime,
+  delaySeconds: status.delaySeconds,
+  dataStatus: status.dataStatus
+});
+```
+
+An anonymous request might report `delaySeconds: 600`; an entitled token can report `0`. This reflects the symbol feed available to the connection, not the user's TradingView plan name.
+
+## Live quotes
+
+```js
+const stop = await api.stream(['NASDAQ:AAPL', 'BINANCE:BTCUSDT'], {
+  onQuote(quote) {
+    console.log(quote.symbol, quote.lp);
+  },
+  onStatus(status) {
+    console.log(status.state);
+  }
+});
+
+// Later:
+stop();
+```
+
+The stream reconnects with capped exponential backoff when the upstream connection closes. Whether updates are realtime or delayed depends on TradingView and exchange entitlements.
+
+## Historical data
+
+```js
+const history = await api.history('NASDAQ:AAPL', {
+  interval: '15',
+  bars: 5_000,
+  chunkSize: 500,
+  session: 'regular',
+  adjustment: 'splits'
+});
+```
+
+Supported intervals are `1`, `3`, `5`, `15`, `30`, `45`, `60`, `120`, `180`, `240`, `1D`, `1W`, and `1M`. Numeric values represent minutes. Bar timestamps are Unix seconds in UTC.
+
+History is loaded in blocks of `chunkSize` bars. After the initial series, the client sends `request_more_data` until it reaches `bars` or TradingView returns no older data. Overlapping updates are deduplicated by timestamp and returned in chronological order. The default chunk size is 500.
+
+## Replay
+
+```js
+const replay = await api.replay('NASDAQ:AAPL', {
   interval: '1D',
   bars: 300,
   speed: 2
 });
 
+const unsubscribe = replay.onBar((bar) => console.log(bar));
+
 replay.go('2026-07-15T00:00:00Z');
 replay.next();
 replay.previous();
 replay.setSpeed(10);
-
-const unsubscribe = replay.onBar((bar) => {
-  console.log(bar);
-});
-
 replay.play();
 replay.pause();
+replay.seek(100);
 replay.reset();
 
 unsubscribe();
+api.deleteReplay(replay.id);
 api.close();
 ```
 
-`go()` accepts Unix seconds, Unix milliseconds, a `Date`, or an ISO date string. It moves to the first available bar at or after that timestamp. `seek()` is available when you want to move by zero-based bar index instead.
+`go()` accepts Unix seconds, Unix milliseconds, a `Date`, or an ISO date string and selects the first bar at or after the timestamp. `seek()` uses a zero-based bar index. Replay state is in memory and does not survive a process restart.
 
-## API examples
+## Configuration
 
-### Symbol data status
+Constructor options override these optional environment variables:
 
-Delay is reported in seconds and reflects the permissions of the configured TradingView token:
-
-```bash
-curl "http://127.0.0.1:3000/api/v1/symbols/CME_MINI%3ANQ1!"
+```text
+TRADINGVIEW_AUTH_TOKEN
+TRADINGVIEW_ORIGIN
+TRADINGVIEW_WS_URL
+TRADINGVIEW_REQUEST_TIMEOUT_MS
+TRADINGVIEW_MAX_BARS
+REPLAY_TTL_MS
+REPLAY_MAX_SESSIONS
 ```
 
-Example anonymous response:
+See `.env.example` for defaults.
 
-```json
-{
-  "symbol": "CME_MINI:NQ1!",
-  "exchange": "CME",
-  "delaySeconds": 600,
-  "realtime": false,
-  "dataStatus": "delayed"
-}
-```
-
-The same symbol can return `delaySeconds: 0` with an account token that has the appropriate exchange entitlement. This reports feed status, not the account's TradingView plan name.
-
-### Quote snapshots
-
-```bash
-curl "http://127.0.0.1:3000/api/v1/quotes?symbols=NASDAQ:AAPL,CME_MINI:NQ1!"
-```
-
-### Historical bars
-
-```bash
-curl "http://127.0.0.1:3000/api/v1/history/CME_MINI%3ANQ1!?interval=1D&bars=300&session=regular"
-```
-
-Supported intervals are `1`, `3`, `5`, `15`, `30`, `45`, `60`, `120`, `180`, `240`, `1D`, `1W`, and `1M`. Numeric values are minutes. Timestamps are Unix seconds in UTC.
-
-### Live quote stream
-
-```bash
-curl -N "http://127.0.0.1:3000/api/v1/stream?symbols=NASDAQ:AAPL,CME_MINI:NQ1!"
-```
-
-The stream emits `ready`, `status`, and `quote` events. It sends a comment heartbeat every 15 seconds and reconnects to TradingView with capped exponential backoff when the upstream connection drops. Clients should also reconnect to this API if their HTTP connection drops; browser `EventSource` does this automatically.
-
-### Create a replay
-
-```bash
-curl -X POST "http://127.0.0.1:3000/api/v1/replays" \
-  -H "content-type: application/json" \
-  -d '{"symbol":"CME_MINI:NQ1!","interval":"1D","bars":300,"speed":2,"autoStart":false}'
-```
-
-Save the returned `id`, then subscribe before resuming so no bar events are missed:
-
-```bash
-curl -N "http://127.0.0.1:3000/api/v1/replays/REPLAY_ID/events"
-```
-
-Control it from another terminal:
-
-```bash
-# Start or resume
-curl -X POST "http://127.0.0.1:3000/api/v1/replays/REPLAY_ID/control" -H "content-type: application/json" -d '{"action":"play"}'
-
-# Pause
-curl -X POST "http://127.0.0.1:3000/api/v1/replays/REPLAY_ID/control" -H "content-type: application/json" -d '{"action":"pause"}'
-
-# Seek by zero-based bar index
-curl -X POST "http://127.0.0.1:3000/api/v1/replays/REPLAY_ID/control" -H "content-type: application/json" -d '{"action":"seek","cursor":100}'
-
-# Go to a timestamp
-curl -X POST "http://127.0.0.1:3000/api/v1/replays/REPLAY_ID/control" -H "content-type: application/json" -d '{"action":"go","timestamp":"2026-07-15T00:00:00Z"}'
-
-# Change speed (bars per second)
-curl -X POST "http://127.0.0.1:3000/api/v1/replays/REPLAY_ID/control" -H "content-type: application/json" -d '{"action":"set_speed","speed":10}'
-
-# Delete
-curl -X DELETE "http://127.0.0.1:3000/api/v1/replays/REPLAY_ID"
-```
-
-Replay state is held in memory. Sessions expire after `REPLAY_TTL_MS` of inactivity and do not survive a service restart. Put Redis or a database behind `ReplayManager` if durable or multi-instance replay is required.
-
-## Authentication and data entitlements
-
-Anonymous mode uses `unauthorized_user_token` and is intentionally the default. It is appropriate for public/delayed data but may not have access to premium or real-time feeds.
-
-Missing, empty, and whitespace-only `TRADINGVIEW_AUTH_TOKEN` values all select anonymous mode. Check `GET /health`; its `authenticationMode` field returns either `anonymous` or `token` without exposing the credential.
-
-If you have an authorized TradingView websocket token, set `TRADINGVIEW_AUTH_TOKEN` through your secret manager. Never commit it or expose it to API callers. This project does not scrape browser cookies, passwords, or login storage. A normal TradingView session cookie is not the same value as a websocket auth token.
-
-Market status, delay, exchange entitlement, and availability are decided upstream. A successful API response does not grant redistribution rights.
-
-## Error format
-
-```json
-{
-  "error": "Human-readable message",
-  "code": "MACHINE_READABLE_CODE",
-  "details": null
-}
-```
-
-Common HTTP codes are `400` for validation/limits, `404` for missing replay data, `502` for upstream TradingView errors, and `504` for upstream timeouts.
-
-## Test
+## Tests
 
 ```powershell
 npm test
@@ -209,32 +174,20 @@ npm run check
 npm run smoke
 ```
 
-The tests mock the market-data client; they do not consume TradingView data. `npm run smoke` makes real quote and five-bar history requests for `CME_MINI:NQ1!` and `NASDAQ:AAPL`. Optionally pass a comma-separated quote list and a history symbol: `npm run smoke -- "BINANCE:BTCUSDT,NASDAQ:MSFT" "BINANCE:BTCUSDT"`.
-
-## Production checklist
-
-- Bind to a private interface or put the service behind an authenticated reverse proxy. The service intentionally has no end-user authentication built in.
-- Restrict CORS instead of using the development-friendly reflected origin setting.
-- Add rate limiting per user/IP and request-size limits at the proxy.
-- Store `TRADINGVIEW_AUTH_TOKEN` in a secret manager.
-- Review TradingView and exchange licensing terms for your use case.
-- Add shared replay storage and coordination before running multiple instances.
-- Monitor upstream timeout, reconnect, and error rates.
-- Pin dependency versions and run a security scanner in CI.
+Unit tests use mocked market-data clients. `npm run smoke` makes real upstream symbol, quote, history, and replay requests. Optionally pass symbols with `npm run smoke -- "BINANCE:BTCUSDT,NASDAQ:MSFT" "BINANCE:BTCUSDT"`.
 
 ## Project structure
 
 ```text
-src/app.js                              HTTP routes, validation, SSE, and API docs
-src/config.js                           Environment configuration
 src/index.js                            Public TradingviewAPI class and exports
-src/tradingview/client.js               Public market-data client class
-src/tradingview/connection.js           WebSocket connection lifecycle class
+src/config.js                           Environment configuration
+src/auth/cache.js                       Local token-session persistence
+src/tradingview/client.js               Market-data client class
+src/tradingview/connection.js           WebSocket connection lifecycle
 src/tradingview/protocol/framing.js     Wire framing and parser
-src/tradingview/protocol/messages.js    All protocol names and message builders
-src/replay/session.js                   Replay state machine class
-src/replay/manager.js                   Replay lifecycle manager class
-src/server.js                           Process startup and graceful shutdown
-scripts/smoke.js                        Real-upstream protocol smoke test
-test/                                   Protocol, replay, and route tests
+src/tradingview/protocol/messages.js    Protocol names and message builders
+src/replay/session.js                   Replay state machine
+src/replay/manager.js                   Replay lifecycle manager
+scripts/smoke.js                        Real-upstream class API smoke test
+test/                                   Unit and class integration tests
 ```
