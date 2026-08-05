@@ -56,12 +56,39 @@ Supply an existing TradingView websocket token when you have one:
 
 ```js
 await api.login({
+  token: process.env.TRADINGVIEW_AUTH_TOKEN
+});
+```
+
+`expires` is optional. When known, it may be Unix seconds, Unix milliseconds, a
+`Date`, or an ISO date string:
+
+```js
+await api.login({
   token: process.env.TRADINGVIEW_AUTH_TOKEN,
   expires: 1798761600
 });
 ```
 
-Session persistence is enabled by default. Tokens are saved in the gitignored `.tradingview/session.json` file. `expires` may be Unix seconds, Unix milliseconds, a `Date`, or an ISO date string. A later `TradingviewAPI` instance automatically loads a valid saved token.
+Or log in with an existing TradingView `sessionid` cookie. The API exchanges it
+for a websocket token and installs that token on the client:
+
+```js
+await api.login({
+  sessionId: process.env.TRADINGVIEW_SESSION_ID
+});
+
+// Equivalent convenience method:
+await api.loginBySessionId(process.env.TRADINGVIEW_SESSION_ID);
+```
+
+When the returned token is a JWT, its expiration is detected automatically. For
+an opaque token, pass `expires` alongside `sessionId` if you enable persistence.
+
+Session persistence is enabled by default. Tokens are saved in the gitignored
+`.tradingview/session.json` file. A later `TradingviewAPI` instance automatically
+loads a saved token. Tokens without `expires` remain cached until
+`clearCachedLogin()` is called or they are replaced with `forceLogin()`.
 
 Use `forceLogin()` to replace the saved token, or disable persistence entirely:
 
@@ -75,7 +102,8 @@ Tokens are stored as plaintext because the original value must be sent upstream.
 
 ### Quote token from a session ID
 
-Exchange an existing TradingView `sessionid` cookie for a websocket quote token:
+Exchange an existing TradingView `sessionid` cookie for a websocket quote token
+without logging in the API client:
 
 ```js
 const api = new TradingviewAPI({ save_session: false });

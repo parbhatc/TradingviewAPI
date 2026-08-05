@@ -3,6 +3,18 @@ import { LoginCache } from './auth/cache.js';
 import { ReplayManager } from './replay/manager.js';
 import { TradingViewClient } from './tradingview/client.js';
 
+function tokenExpiration(token) {
+  const payload = token.split('.')[1];
+  if (!payload) return undefined;
+
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return Number.isFinite(decoded.exp) && decoded.exp > 0 ? decoded.exp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class TradingviewAPI {
   constructor(options = {}) {
     const defaults = loadConfig();
@@ -38,6 +50,10 @@ export class TradingviewAPI {
     return this.#performLogin(credentials, 'force');
   }
 
+  loginBySessionId(sessionId, options = {}) {
+    return this.login({ sessionId, ...options });
+  }
+
   quoteToken(sessionId) {
     return this.client.getQuoteToken({ sessionId });
   }
@@ -49,15 +65,29 @@ export class TradingviewAPI {
   }
 
   async #performLogin(credentials, source) {
-    if (!credentials || typeof credentials !== 'object' || credentials.token === undefined) {
-      throw new TypeError('login requires { token, expires }');
+    if (!credentials || typeof credentials !== 'object') {
+      throw new TypeError('login requires { token } or { sessionId }');
     }
 
-    const result = this.client.setAuthToken(credentials.token);
+    const hasToken = credentials.token !== undefined;
+    const hasSessionId = credentials.sessionId !== undefined;
+    if (hasToken === hasSessionId) {
+      throw new TypeError('login requires exactly one of token or sessionId');
+    }
+
+    let token = credentials.token;
+    let expires = credentials.expires;
+    if (hasSessionId) {
+      const quoteToken = await this.client.getQuoteToken({ sessionId: credentials.sessionId });
+      token = quoteToken.token;
+      expires ??= tokenExpiration(token);
+    }
+
+    const result = this.client.setAuthToken(token);
 
     const session = this.loginCache.save({
       token: this.client.options.authToken,
-      expires: credentials.expires
+      expires
     });
     this.cachedLogin = session;
 
