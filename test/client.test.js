@@ -196,3 +196,31 @@ test('pages backward until it has enough bars at or before the requested end tim
   assert.equal(history.to, 350);
   assert.equal(connection.sent.filter(({ method }) => method === 'request_more_data').length, 2);
 });
+
+test('persistent bar streams distinguish forming updates from closed candles', async () => {
+  class StreamConnection extends EventEmitter {
+    sent = [];
+    send(message) { this.sent.push(message); }
+    close() { this.emit('closed', { code: 1000, reason: 'test complete' }); }
+  }
+  const connection = new StreamConnection();
+  const client = new TradingViewClient(options);
+  client.createConnection = async () => connection;
+  const closed = [];
+  const updates = [];
+  const statuses = [];
+  const stop = await client.streamBars({ symbol: 'CME_MINI:NQ1!', interval: '30S' }, {
+    onBar: (value) => closed.push(value),
+    onUpdate: (value) => updates.push(value),
+    onStatus: (value) => statuses.push(value.state)
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const create = connection.sent.find(({ method }) => method === 'create_series');
+  const chart = create.params[0];
+  connection.emit('message', { type: 'timescale_update', params: [chart, { series_1: { s: [bar(60), bar(90)] } }] });
+  connection.emit('message', { type: 'timescale_update', params: [chart, { series_1: { s: [bar(90), bar(120)] } }] });
+  assert.deepEqual(closed.map((value) => value.time), [60, 90]);
+  assert.deepEqual(updates.map((value) => value.time), [90, 120]);
+  assert.ok(statuses.includes('connected'));
+  stop();
+});

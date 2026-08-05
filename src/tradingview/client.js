@@ -335,6 +335,89 @@ export class TradingViewClient {
     return () => { stopped = true; connection?.close(); };
   }
 
+  async streamBars({ symbol, interval = '1', session = 'regular', adjustment = 'splits', bars = 2 },
+    { onBar = () => {}, onUpdate = () => {}, onStatus = () => {} } = {}) {
+    let stopped = false;
+    let connection;
+    let attempt = 0;
+    const run = async () => {
+      while (!stopped) {
+        try {
+          onStatus({ state: 'connecting', attempt });
+          connection = await this.createConnection();
+          const chartSession = randomId('cs');
+          const symbolId = 'symbol_1';
+          const seriesId = 'series_1';
+          let initialized = false;
+          let connected = false;
+          let lastCurrent = null;
+          let lastClosedTime = null;
+          let lastFingerprint = null;
+          const onMessage = (incoming) => {
+            if ([InboundMessage.PROTOCOL_ERROR, InboundMessage.CRITICAL_ERROR,
+              InboundMessage.SYMBOL_ERROR].includes(incoming.type)) {
+              onStatus({ state: 'error', error: new TradingViewError('TradingView rejected the bar stream',
+                { details: incoming.params }) });
+              connection.close();
+              return;
+            }
+            if (incoming.type !== InboundMessage.TIMESCALE_UPDATE || incoming.params[0] !== chartSession) return;
+            const rows = incoming.params?.[1]?.[seriesId]?.s ?? [];
+            const updates = rows.map(normalizeBar).filter(Boolean).sort((left, right) => left.time - right.time);
+            if (!updates.length) return;
+            const current = updates.at(-1);
+            if (!initialized) {
+              for (const closed of updates.slice(0, -1)) {
+                if (closed.time === lastClosedTime) continue;
+                lastClosedTime = closed.time;
+                onBar(closed);
+              }
+              initialized = true;
+            } else if (lastCurrent && current.time > lastCurrent.time) {
+              const closed = updates.find((bar) => bar.time === lastCurrent.time) || lastCurrent;
+              if (closed.time !== lastClosedTime) {
+                lastClosedTime = closed.time;
+                onBar(closed);
+              }
+            }
+            const fingerprint = `${current.time}:${current.open}:${current.high}:${current.low}:${current.close}:${current.volume}`;
+            lastCurrent = current;
+            if (fingerprint !== lastFingerprint) {
+              lastFingerprint = fingerprint;
+              onUpdate(current);
+            }
+            if (!connected) {
+              connected = true;
+              attempt = 0;
+              onStatus({ state: 'connected' });
+            }
+          };
+          connection.on('message', onMessage);
+          connection.send(Messages.createChartSession(chartSession));
+          connection.send(Messages.switchTimezone(chartSession));
+          connection.send(Messages.resolveSymbol(chartSession, symbolId, { symbol, adjustment, session }));
+          connection.send(Messages.createSeries(chartSession, seriesId, 's1', symbolId, interval,
+            Math.max(2, Math.min(10, Math.trunc(bars) || 2))));
+          await new Promise((resolve) => connection.once('closed', resolve));
+          connection.off('message', onMessage);
+        } catch (error) {
+          if (!stopped) onStatus({ state: 'error', error });
+        }
+        if (!stopped) {
+          attempt += 1;
+          const delayMs = Math.min(60_000, 1000 * 2 ** Math.min(attempt - 1, 6));
+          onStatus({ state: 'reconnecting', attempt, delayMs });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    };
+    void run();
+    return () => {
+      stopped = true;
+      connection?.close();
+    };
+  }
+
   async searchSymbols({ query, exchange = '', type = '', limit = 30 }) {
     const url = new URL('https://symbol-search.tradingview.com/symbol_search/');
     url.searchParams.set('text', query); url.searchParams.set('hl', '1'); url.searchParams.set('exchange', exchange);

@@ -126,6 +126,10 @@ export class TradingviewAPI {
     return this.client.streamQuotes(list, handlers);
   }
 
+  streamBars(symbol, options = {}, handlers = {}) {
+    return this.client.streamBars({ symbol, ...options }, handlers);
+  }
+
   async replay(symbol, options = {}) {
     const {
       speed = 1,
